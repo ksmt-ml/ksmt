@@ -23,6 +23,8 @@ include("ksmt-runner:solver-generator")
 include("ksmt-test")
 include("ksmt-symfpu")
 
+include("ksmt-tuner")
+
 pluginManagement {
     repositories {
         gradlePluginPortal()
