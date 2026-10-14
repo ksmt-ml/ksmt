@@ -1,4 +1,4 @@
-package io.ksmt.tuning
+package io.ksmt.profiling
 
 import io.ksmt.expr.KExpr
 import io.ksmt.solver.KSolverStatus
@@ -35,11 +35,27 @@ enum class KSolverConfigurationBase {
     UNKNOWN,
 }
 
-/** Native defaults or an unknown base, followed by the explicit overrides known to KSMT. */
+/** An observed solver configuration value. It has no application or merge semantics. */
+sealed class KSolverConfigurationValue {
+    data class BoolValue(val value: Boolean) : KSolverConfigurationValue()
+    data class IntValue(val value: Int) : KSolverConfigurationValue()
+    data class StringValue(val value: String) : KSolverConfigurationValue()
+    data class DoubleValue(val value: Double) : KSolverConfigurationValue() {
+        init {
+            require(value.isFinite()) { "Solver configuration value must be finite" }
+        }
+    }
+}
+
+/** Native defaults or an unknown base, followed by the explicit overrides observed by KSMT. */
 data class KSolverConfigurationSnapshot(
     val base: KSolverConfigurationBase,
-    val overrides: KSolverConfigurationPatch = KSolverConfigurationPatch.EMPTY,
-)
+    val overrides: Map<String, KSolverConfigurationValue> = emptyMap(),
+) {
+    init {
+        require(overrides.keys.none { it.isBlank() }) { "Solver parameter names must not be blank" }
+    }
+}
 
 enum class KSolverCallOutcome {
     SUCCESS,
@@ -78,11 +94,15 @@ sealed interface KSolverProfileEvent {
     val metadata: KSolverCallMetadata
 }
 
-/** An inspectable configuration change. A null patch denotes an opaque backend-specific change. */
+/** An inspectable configuration change. Null overrides denote an opaque backend-specific change. */
 data class KSolverConfigureEvent(
-    val patch: KSolverConfigurationPatch?,
+    val overrides: Map<String, KSolverConfigurationValue>?,
     override val metadata: KSolverCallMetadata,
-) : KSolverProfileEvent
+) : KSolverProfileEvent {
+    init {
+        require(overrides?.keys?.none { it.isBlank() } != false) { "Solver parameter names must not be blank" }
+    }
+}
 
 /** A formula added to the current assertion scope. */
 data class KSolverAssertEvent(
@@ -149,8 +169,8 @@ data class KSolverLifecycleEvent(
 /**
  * Immutable, in-memory profile of a bounded incremental solver workload.
  *
- * Expressions remain KSMT AST objects. Persistence and model-specific feature tensors are outside
- * this contract and belong to consumers of the profile.
+ * Expressions remain KSMT AST objects. Persistence and consumer-specific feature tensors are
+ * outside this contract and belong to profile consumers.
  */
 data class KSolverProfile(
     val schemaVersion: String,
@@ -167,6 +187,6 @@ data class KSolverProfile(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = "ksmt-solver-profile-v1"
+        const val CURRENT_SCHEMA_VERSION = "ksmt-solver-profile-v0"
     }
 }

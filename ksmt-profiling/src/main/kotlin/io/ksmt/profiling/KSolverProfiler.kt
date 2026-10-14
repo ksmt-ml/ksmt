@@ -1,4 +1,4 @@
-package io.ksmt.tuning
+package io.ksmt.profiling
 
 import io.ksmt.solver.KSolver
 import io.ksmt.solver.KSolverConfiguration

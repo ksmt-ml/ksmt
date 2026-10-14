@@ -8,7 +8,7 @@ Get the most out of SMT solving with KSMT features:
 * Utilities to [simplify and transform](#utilities-to-simplify-and-transform-expressions) your expressions
 * Switching between solvers and support for [portfolio mode](#using-multiple-solvers--portfolio-mode-)
 * Running solvers in a [separate process](#running-solvers-in-separate-processes) to reduce timeout-related crashes
-* Contracts for profiling incremental workloads and obtaining configuration recommendations from an external pre-trained tuner through the optional [`ksmt-tuning`](docs/solver-tuning.md) module
+* Observation-only contracts for profiling incremental solver workloads through the optional [`ksmt-profiling`](docs/solver-profiling.md) module
 * Streamlined [solver delivery](#ksmt-distribution) with no need for building a solver or implementing JVM bindings
 
 [![KSMT: build](https://github.com/UnitTestBot/ksmt/actions/workflows/build-and-run-tests.yml/badge.svg)](https://github.com/UnitTestBot/ksmt/actions/workflows/build-and-run-tests.yml)
