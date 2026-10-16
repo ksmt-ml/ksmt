@@ -6,8 +6,7 @@ import io.ksmt.solver.KSolverConfiguration
 /**
  * Contract for a transparent [KSolver] decorator that records a bounded incremental workload.
  *
- * KSMT currently defines this boundary but does not provide an implementation. A future
- * implementation must preserve delegate behavior, retain asserted expressions and assumptions,
+ * Implementations must preserve delegate behavior, retain asserted expressions and assumptions,
  * and report calls in execution order.
  */
 interface KSolverProfiler<Config : KSolverConfiguration> : KSolver<Config> {

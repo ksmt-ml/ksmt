@@ -111,6 +111,13 @@ data class KSolverAssertEvent(
     override val metadata: KSolverCallMetadata,
 ) : KSolverProfileEvent
 
+/** Formulas added by one bulk [io.ksmt.solver.KSolver.assert] call. */
+data class KSolverAssertBatchEvent(
+    val expressions: List<KExpr<KBoolSort>>,
+    val tracked: Boolean,
+    override val metadata: KSolverCallMetadata,
+) : KSolverProfileEvent
+
 data class KSolverPushEvent(
     override val metadata: KSolverCallMetadata,
 ) : KSolverProfileEvent
@@ -118,11 +125,7 @@ data class KSolverPushEvent(
 data class KSolverPopEvent(
     val levels: UInt,
     override val metadata: KSolverCallMetadata,
-) : KSolverProfileEvent {
-    init {
-        require(levels > 0u) { "Pop level count must be positive" }
-    }
-}
+) : KSolverProfileEvent
 
 /**
  * A satisfiability check over the active assertion stack and optional assumptions.
@@ -131,6 +134,7 @@ data class KSolverPopEvent(
  * event. [assumptions] are used only for this check.
  */
 data class KSolverCheckEvent(
+    val checkId: Long,
     val assumptions: List<KExpr<KBoolSort>> = emptyList(),
     val timeoutNanos: Long? = null,
     val status: KSolverStatus? = null,
@@ -138,11 +142,19 @@ data class KSolverCheckEvent(
     override val metadata: KSolverCallMetadata,
 ) : KSolverProfileEvent {
     init {
+        require(checkId >= 0) { "Check id must not be negative" }
         require(timeoutNanos == null || timeoutNanos >= 0) { "Timeout must not be negative" }
         require(reasonOfUnknown == null || status == KSolverStatus.UNKNOWN) {
             "Unknown reason requires UNKNOWN solver status"
         }
     }
+}
+
+/** Describes whether the recorded solver session can still receive events. */
+enum class KSolverProfileState {
+    ACTIVE,
+    CLOSED,
+    CLOSE_FAILED,
 }
 
 enum class KSolverResultAccessKind {
@@ -174,6 +186,10 @@ data class KSolverLifecycleEvent(
  */
 data class KSolverProfile(
     val schemaVersion: String,
+    val profileId: String,
+    val runId: String,
+    val parentProfileId: String? = null,
+    val state: KSolverProfileState,
     val solver: KSolverDescriptor,
     val startedAtEpochMillis: Long,
     val observedDurationNanos: Long,
@@ -183,6 +199,9 @@ data class KSolverProfile(
 ) {
     init {
         require(schemaVersion.isNotBlank()) { "Profile schema version must not be blank" }
+        require(profileId.isNotBlank()) { "Profile id must not be blank" }
+        require(runId.isNotBlank()) { "Run id must not be blank" }
+        require(parentProfileId?.isNotBlank() != false) { "Parent profile id must not be blank" }
         require(observedDurationNanos >= 0) { "Observed duration must not be negative" }
     }
 
