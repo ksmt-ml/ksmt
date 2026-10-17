@@ -1,5 +1,6 @@
 rootProject.name = "ksmt"
 include("ksmt-core")
+include("ksmt-profiling")
 
 include("ksmt-z3")
 include("ksmt-z3:ksmt-z3-core")
