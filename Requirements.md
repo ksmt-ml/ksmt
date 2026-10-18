@@ -78,7 +78,7 @@ Main goals are:
 1. Allow the user to instantiate KSMT expressions from SMT-LIB.
 2. Provide us the opportunity to use a rich database of [benchmarks](https://smtlib.cs.uiowa.edu/benchmarks.shtml).
 
-Currently, [implemented](ksmt-z3/src/main/kotlin/io/ksmt/solver/z3/KZ3SMTLibParser.kt) on top of Z3 SMT solver.
+Currently, [implemented](ksmt-z3/ksmt-z3-core/src/main/kotlin/io/ksmt/solver/z3/KZ3SMTLibParser.kt) on top of Z3 SMT solver.
 A solver-agnostic implementation may be done in the future.
 
 ### SMT-LIB2 serializer
@@ -124,7 +124,7 @@ Z3 has native support for all theories,
 listed in [KSMT supported theories](#basic-theories-support)
 and provides all the functionality, listed in [SMT solver features](#smt-solver-support).
 
-For implementation details, check out [KZ3Solver](ksmt-z3/src/main/kotlin/io/ksmt/solver/z3/KZ3Solver.kt).
+For implementation details, check out [KZ3Solver](ksmt-z3/ksmt-z3-core/src/main/kotlin/io/ksmt/solver/z3/KZ3Solver.kt).
 
 ### Bitwuzla solver support
 
@@ -147,7 +147,7 @@ For the solver features, listed in [SMT solver features](#smt-solver-support),
 Bitwuzla provides full native support.
 
 For implementation details, check
-out [KBitwuzlaSolver](ksmt-bitwuzla/src/main/kotlin/io/ksmt/solver/bitwuzla/KBitwuzlaSolver.kt).
+out [KBitwuzlaSolver](ksmt-bitwuzla/ksmt-bitwuzla-core/src/main/kotlin/io/ksmt/solver/bitwuzla/KBitwuzlaSolver.kt).
 
 ### Yices2 solver support
 

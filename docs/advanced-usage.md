@@ -1,8 +1,8 @@
 # Advanced usage
 
-For basic KSMT usage, please refer to [Getting started](/docs/getting-started.md) guide.
+For basic KSMT usage, please refer to [Getting started](getting-started.md) guide.
 
-Having tried the essential scenarios, find the [advanced example](/examples/src/main/kotlin/AdvancedExamples.kt) and proceed to advanced usage:
+Having tried the essential scenarios, find the [advanced example](../examples/src/main/kotlin/AdvancedExamples.kt) and proceed to advanced usage:
 
 <!-- TOC -->
   * [Working with SMT formulas](#working-with-smt-formulas)
