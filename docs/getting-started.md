@@ -1,6 +1,6 @@
 # Getting started
 
-For your first steps with KSMT, try our [code examples](/examples).
+For your first steps with KSMT, try our [code examples](../examples).
 
 To check OS compatibility, see [Supported solvers and theories](../README.md#supported-solvers-and-theories).
 
