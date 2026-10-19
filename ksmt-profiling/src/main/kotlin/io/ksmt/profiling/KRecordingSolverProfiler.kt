@@ -7,7 +7,6 @@ import io.ksmt.solver.KSolverConfiguration
 import io.ksmt.solver.KSolverStatus
 import io.ksmt.sort.KBoolSort
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.nanoseconds
@@ -18,6 +17,15 @@ import kotlin.time.Duration.Companion.nanoseconds
  * The decorator never serializes expressions and never invokes solver operations that the caller
  * did not request. Result-access events refer to the last successfully completed check without
  * calling any additional solver operation.
+ *
+ * Ordering guarantees:
+ * - Every solver call except [interrupt] holds [eventsLock] from the moment its sequence number is
+ *   assigned until its event is stored. Calls from several threads therefore run one after another
+ *   and events are stored in sequence order. When the event limit is reached, the retained events
+ *   are an exact prefix of the call history.
+ * - [interrupt] forwards to the delegate without waiting for the lock, so it can stop a check that
+ *   is running in another thread. Its event is numbered and stored after that check has finished.
+ * - [snapshot] waits for a running solver call to finish.
  */
 @Suppress("LongParameterList")
 class KRecordingSolverProfiler<Config : KSolverConfiguration>(
@@ -33,13 +41,15 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 ) : KSolverProfiler<Config> {
     private val startedAt = Instant.now()
     private val startedAtNanos = System.nanoTime()
-    private val nextSequenceNumber = AtomicLong()
-    private val nextCheckId = AtomicLong()
     private val eventsLock = Any()
-    private val events = arrayListOf<KSolverProfileEvent>()
-    private val assertionCountsByScope = arrayListOf(0L)
     private val currentTask = ThreadLocal<KSolverTask?>()
 
+    // Everything below is guarded by [eventsLock].
+    private val events = arrayListOf<KSolverProfileEvent>()
+    private val assertionCountsByScope = arrayListOf(0L)
+    private var nextSequenceNumber = 0L
+    private var nextCheckId = 0L
+    private var activeAssertionCount = 0L
     private var totalAssertionCount = 0L
     private var droppedEventCount = 0L
     private var lastSuccessfulCheckId: Long? = null
@@ -62,7 +72,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             initialConfiguration =
                 initialConfiguration.copy(overrides = initialConfiguration.overrides.toMap()),
             eventLimit = maxRecordedEvents,
-            events = events.sortedBy { it.metadata.sequenceNumber }.toList(),
+            events = events.toList(),
             droppedEventCount = droppedEventCount,
             attributes = profileAttributes.toMap(),
         )
@@ -133,21 +143,16 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun pop(n: UInt) {
         recordUnitCall(
-            onSuccess = {
-                val removedScopeCount = minOf(n.toLong(), assertionCountsByScope.lastIndex.toLong()).toInt()
-                repeat(removedScopeCount) {
-                    assertionCountsByScope.removeAt(assertionCountsByScope.lastIndex)
-                }
-            },
+            onSuccess = { removeScopes(n) },
             event = { metadata -> KSolverPopEvent(n, metadata) },
         ) {
             delegate.pop(n)
         }
     }
 
-    override fun check(timeout: Duration): KSolverStatus {
-        val checkId = nextCheckId.getAndIncrement()
-        return recordResultCall(
+    override fun check(timeout: Duration): KSolverStatus = synchronized(eventsLock) {
+        val checkId = nextCheckId++
+        recordResultCall(
             onSuccess = { lastSuccessfulCheckId = checkId },
             onFailure = { lastSuccessfulCheckId = null },
             event = { status, metadata ->
@@ -166,9 +171,9 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     override fun checkWithAssumptions(
         assumptions: List<KExpr<KBoolSort>>,
         timeout: Duration,
-    ): KSolverStatus {
-        val checkId = nextCheckId.getAndIncrement()
-        return recordResultCall(
+    ): KSolverStatus = synchronized(eventsLock) {
+        val checkId = nextCheckId++
+        recordResultCall(
             onSuccess = { lastSuccessfulCheckId = checkId },
             onFailure = { lastSuccessfulCheckId = null },
             event = { status, metadata ->
@@ -216,12 +221,30 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             delegate.reasonOfUnknown()
         }
 
+    /**
+     * Forwards to the delegate without taking [eventsLock], so it can stop a check that is running
+     * in another thread. The event is numbered and stored after the delegate call returns.
+     */
     override fun interrupt() {
-        recordUnitCall(
-            event = { metadata -> KSolverLifecycleEvent(KSolverLifecycleEventKind.INTERRUPT, metadata) },
-        ) {
-            delegate.interrupt()
+        val startedAtNanos = System.nanoTime()
+        val task = currentTaskSnapshot()
+        val failure = runCatching { delegate.interrupt() }.exceptionOrNull()
+        synchronized(eventsLock) {
+            val call = ProfiledCall(nextSequenceNumber++, startedAtNanos, task)
+            runCatching {
+                addEvent(
+                    KSolverLifecycleEvent(
+                        KSolverLifecycleEventKind.INTERRUPT,
+                        call.metadata(
+                            outcome = if (failure == null) KSolverCallOutcome.SUCCESS else KSolverCallOutcome.FAILURE,
+                            failureType = failure?.javaClass?.name,
+                            failureMessage = failure?.message,
+                        ),
+                    ),
+                )
+            }
         }
+        if (failure != null) throw failure
     }
 
     override fun close() {
@@ -237,7 +260,15 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     private fun addAssertions(count: Int) {
         val countAsLong = count.toLong()
         assertionCountsByScope[assertionCountsByScope.lastIndex] += countAsLong
+        activeAssertionCount += countAsLong
         totalAssertionCount += countAsLong
+    }
+
+    private fun removeScopes(n: UInt) {
+        val removedScopeCount = minOf(n.toLong(), assertionCountsByScope.lastIndex.toLong()).toInt()
+        repeat(removedScopeCount) {
+            activeAssertionCount -= assertionCountsByScope.removeAt(assertionCountsByScope.lastIndex)
+        }
     }
 
     private inline fun recordUnitCall(
@@ -260,44 +291,43 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         crossinline onFailure: (Throwable) -> Unit = {},
         crossinline event: (T?, KSolverCallMetadata) -> KSolverProfileEvent,
         block: () -> T,
-    ): T {
+    ): T = synchronized(eventsLock) {
         val call = beginCall()
         val result = try {
             block()
         } catch (error: Throwable) {
             runCatching {
-                synchronized(eventsLock) {
-                    onFailure(error)
-                    addEvent(
-                        event(
-                            null,
-                            call.metadata(
-                                outcome = KSolverCallOutcome.FAILURE,
-                                failureType = error.javaClass.name,
-                                failureMessage = error.message,
-                            ),
+                onFailure(error)
+                addEvent(
+                    event(
+                        null,
+                        call.metadata(
+                            outcome = KSolverCallOutcome.FAILURE,
+                            failureType = error.javaClass.name,
+                            failureMessage = error.message,
                         ),
-                    )
-                }
+                    ),
+                )
             }
             throw error
         }
 
         runCatching {
-            synchronized(eventsLock) {
-                onSuccess(result)
-                addEvent(event(result, call.metadata(KSolverCallOutcome.SUCCESS)))
-            }
+            onSuccess(result)
+            addEvent(event(result, call.metadata(KSolverCallOutcome.SUCCESS)))
         }
-        return result
+        result
     }
 
     private fun beginCall(): ProfiledCall =
         ProfiledCall(
-            sequenceNumber = nextSequenceNumber.getAndIncrement(),
+            sequenceNumber = nextSequenceNumber++,
             startedAtNanos = System.nanoTime(),
-            task = currentTask.get()?.let { it.copy(attributes = it.attributes.toMap()) },
+            task = currentTaskSnapshot(),
         )
+
+    private fun currentTaskSnapshot(): KSolverTask? =
+        currentTask.get()?.let { it.copy(attributes = it.attributes.toMap()) }
 
     private fun ProfiledCall.metadata(
         outcome: KSolverCallOutcome,
@@ -312,7 +342,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             outcome = outcome,
             task = task,
             stackDepth = assertionCountsByScope.lastIndex,
-            activeAssertionCount = assertionCountsByScope.sum(),
+            activeAssertionCount = activeAssertionCount,
             totalAssertionCount = totalAssertionCount,
             failureType = failureType,
             failureMessage = failureMessage,
