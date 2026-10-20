@@ -26,6 +26,12 @@ import kotlin.time.Duration.Companion.nanoseconds
  * - [interrupt] forwards to the delegate without waiting for the lock, so it can stop a check that
  *   is running in another thread. Its event is numbered and stored after that check has finished.
  * - [snapshot] waits for a running solver call to finish.
+ *
+ * The observed duration stops growing once a [close] call has finished. A repeated [close] never
+ * turns a closed profile into a failed one.
+ *
+ * Recording problems ([Exception]s thrown while building or storing an event) are ignored and
+ * never change what the caller of the solver sees.
  */
 @Suppress("LongParameterList")
 class KRecordingSolverProfiler<Config : KSolverConfiguration>(
@@ -54,6 +60,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     private var droppedEventCount = 0L
     private var lastSuccessfulCheckId: Long? = null
     private var state = KSolverProfileState.ACTIVE
+    private var closedAtNanos: Long? = null
 
     init {
         require(maxRecordedEvents > 0) { "Maximum recorded event count must be positive" }
@@ -68,7 +75,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             state = state,
             solver = solver.copy(attributes = solver.attributes.toMap()),
             startedAt = startedAt,
-            observedDuration = elapsedDuration(System.nanoTime()),
+            observedDuration = elapsedSinceStart(closedAtNanos ?: System.nanoTime()),
             initialConfiguration =
                 initialConfiguration.copy(overrides = initialConfiguration.overrides.toMap()),
             eventLimit = maxRecordedEvents,
@@ -151,6 +158,8 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     }
 
     override fun check(timeout: Duration): KSolverStatus = synchronized(eventsLock) {
+        // The lock is entered again inside recordResultCall (allowed for the same thread). Taking it
+        // here makes checkId and the sequence number come from the same critical section.
         val checkId = nextCheckId++
         recordResultCall(
             onSuccess = { lastSuccessfulCheckId = checkId },
@@ -230,8 +239,9 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         val task = currentTaskSnapshot()
         val failure = runCatching { delegate.interrupt() }.exceptionOrNull()
         synchronized(eventsLock) {
+            // Unlike other calls, the number is assigned after the delegate call returns.
             val call = ProfiledCall(nextSequenceNumber++, startedAtNanos, task)
-            runCatching {
+            recordSafely {
                 addEvent(
                     KSolverLifecycleEvent(
                         KSolverLifecycleEventKind.INTERRUPT,
@@ -249,12 +259,24 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun close() {
         recordUnitCall(
-            onSuccess = { state = KSolverProfileState.CLOSED },
-            onFailure = { state = KSolverProfileState.CLOSE_FAILED },
+            onSuccess = { markClosed(KSolverProfileState.CLOSED) },
+            onFailure = { markClosed(KSolverProfileState.CLOSE_FAILED) },
             event = { metadata -> KSolverLifecycleEvent(KSolverLifecycleEventKind.CLOSE, metadata) },
         ) {
             delegate.close()
         }
+    }
+
+    /**
+     * A successful close always wins. A failed close only marks a session that is still active,
+     * so a later repeated close cannot turn [KSolverProfileState.CLOSED] into a failure.
+     * The observed duration stops at the first finished close.
+     */
+    private fun markClosed(newState: KSolverProfileState) {
+        if (newState == KSolverProfileState.CLOSED || state == KSolverProfileState.ACTIVE) {
+            state = newState
+        }
+        if (closedAtNanos == null) closedAtNanos = System.nanoTime()
     }
 
     private fun addAssertions(count: Int) {
@@ -296,7 +318,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         val result = try {
             block()
         } catch (error: Throwable) {
-            runCatching {
+            recordSafely {
                 onFailure(error)
                 addEvent(
                     event(
@@ -312,13 +334,29 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             throw error
         }
 
-        runCatching {
+        recordSafely {
             onSuccess(result)
             addEvent(event(result, call.metadata(KSolverCallOutcome.SUCCESS)))
         }
         result
     }
 
+    /**
+     * Runs a recording step and drops its [Exception] so profiling never changes the outcome of
+     * a delegate call. [Error]s such as OutOfMemoryError are not recording problems and propagate.
+     */
+    @Suppress("TooGenericExceptionCaught", "SwallowedException")
+    private inline fun recordSafely(step: () -> Unit) {
+        try {
+            step()
+        } catch (_: Exception) {
+            // Intentionally ignored, see the function documentation.
+        }
+    }
+
+    /**
+     * Gives a number, remembers the start time and the current task
+     */
     private fun beginCall(): ProfiledCall =
         ProfiledCall(
             sequenceNumber = nextSequenceNumber++,
@@ -337,7 +375,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         val finishedAtNanos = System.nanoTime()
         return KSolverCallMetadata(
             sequenceNumber = sequenceNumber,
-            startedAfterSession = elapsedDuration(startedAtNanos),
+            startedAfterSession = elapsedSinceStart(startedAtNanos),
             duration = (finishedAtNanos - startedAtNanos).coerceAtLeast(0).nanoseconds,
             outcome = outcome,
             task = task,
@@ -349,8 +387,9 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         )
     }
 
-    private fun elapsedDuration(now: Long): Duration =
-        (now - startedAtNanos).coerceAtLeast(0).nanoseconds
+    /** Time between the profiler creation and [nowNanos], a value of [System.nanoTime]. */
+    private fun elapsedSinceStart(nowNanos: Long): Duration =
+        (nowNanos - startedAtNanos).coerceAtLeast(0).nanoseconds
 
     private fun addEvent(event: KSolverProfileEvent) {
         if (events.size < maxRecordedEvents) {

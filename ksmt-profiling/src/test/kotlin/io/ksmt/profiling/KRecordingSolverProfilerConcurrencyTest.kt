@@ -17,6 +17,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.time.Duration
 
@@ -88,6 +89,43 @@ class KRecordingSolverProfilerConcurrencyTest {
     }
 
     @Test
+    fun `observed duration stops growing after close`() {
+        val profiler = profiler(StubSolver(ctx))
+
+        profiler.close()
+        val first = profiler.snapshot().observedDuration
+        Thread.sleep(50)
+        val second = profiler.snapshot().observedDuration
+
+        assertEquals(first, second)
+    }
+
+    @Test
+    fun `second close keeps the closed state`() {
+        val profiler = profiler(StubSolver(ctx))
+
+        profiler.close()
+        profiler.close()
+
+        val profile = profiler.snapshot()
+        assertEquals(KSolverProfileState.CLOSED, profile.state)
+        assertEquals(2, profile.events.size)
+    }
+
+    @Test
+    fun `delegate exception is rethrown as the same object and recorded`() {
+        val failure = IllegalStateException("check failure")
+        val profiler = profiler(StubSolver(ctx, checkFailure = failure))
+
+        val actual = assertFailsWith<IllegalStateException> { profiler.check() }
+
+        assertSame(failure, actual)
+        val check = assertIs<KSolverCheckEvent>(profiler.snapshot().events.single())
+        assertEquals(KSolverCallOutcome.FAILURE, check.metadata.outcome)
+        assertEquals(IllegalStateException::class.java.name, check.metadata.failureType)
+    }
+
+    @Test
     fun `failed close marks an active profile`() {
         val failure = IllegalStateException("close failure")
         val profiler = profiler(StubSolver(ctx, closeFailure = failure))
@@ -123,7 +161,7 @@ class KRecordingSolverProfilerConcurrencyTest {
 
         profiler.withTask(outer) {
             push()
-            runCatching {
+            runCatching<Unit> {
                 withTask(inner) {
                     push()
                     error("boom")
@@ -180,13 +218,17 @@ class KRecordingSolverProfilerConcurrencyTest {
     private open class StubSolver(
         private val ctx: KContext,
         private val closeFailure: Throwable? = null,
+        private val checkFailure: Throwable? = null,
     ) : KSolver<TestConfiguration> {
         override fun configure(configurator: TestConfiguration.() -> Unit) = TestConfiguration().configurator()
         override fun assert(expr: KExpr<KBoolSort>) = Unit
         override fun assertAndTrack(expr: KExpr<KBoolSort>) = Unit
         override fun push() = Unit
         override fun pop(n: UInt) = Unit
-        override fun check(timeout: Duration): KSolverStatus = KSolverStatus.SAT
+        override fun check(timeout: Duration): KSolverStatus {
+            checkFailure?.let { throw it }
+            return KSolverStatus.SAT
+        }
 
         override fun checkWithAssumptions(
             assumptions: List<KExpr<KBoolSort>>,
