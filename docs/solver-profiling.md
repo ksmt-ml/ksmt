@@ -1,9 +1,14 @@
 # Solver workload profiling contracts
 
-The optional `ksmt-profiling` module defines an observation-only, interface
-boundary for incremental solver workloads. It does not contain a profiler
-implementation, configuration recommender, model training, configuration
-search, ONNX Runtime, or a model.
+The optional `ksmt-profiling` module defines an observation-only boundary for
+incremental solver workloads. Its stable production surface is the profile and
+profiler contracts; it does not own configuration recommendation, model
+training, configuration search, ONNX Runtime, or a model.
+
+The `dev/litvinovmitch11/demo` branch additionally contains
+`KRecordingSolverProfiler` as a non-production reference implementation. It is
+kept there to exercise the contracts end to end and is not part of the
+production implementation commitment.
 
 ## Profile model
 
@@ -39,12 +44,13 @@ KSMT contract.
 
 `KSolverProfilerFactory` wraps an existing solver using explicit session IDs,
 solver metadata, initial configuration, attributes, and an event limit.
-`KSolverProfiler<Config>` extends `KSolver<Config>` and specifies the future
-transparent decorator. It exposes a structurally independent `snapshot` and
+`KSolverProfiler<Config>` extends `KSolver<Config>` and specifies a transparent
+decorator. It exposes a structurally independent `snapshot` and
 optional application task context. Recording may continue after a snapshot,
 but the returned collections must remain stable. Profiling must not turn a
-successful delegate call into a failure. KSMT does not yet provide an
-implementation.
+successful delegate call into a failure. The stable contract intentionally
+does not select or promise a production implementation; the demo branch's
+recording decorator is reference code for validation and infrastructure work.
 
 The event limit bounds retained AST references. A profile retains the ordered
 event prefix up to that limit, continues forwarding every solver call, and

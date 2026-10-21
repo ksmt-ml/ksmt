@@ -185,6 +185,23 @@ class IncrementalApiTest {
     }
 
     @Test
+    fun testRestoreSimplifiedExpressionAfterPop(): Unit = with(ctx) {
+        val value = bv32Sort.mkConst("value")
+        val zero = mkBv(0, bv32Sort)
+        val expression = mkBvAddNoOverflowExprNoSimplify(value, zero, isSigned = true)
+
+        solver.push()
+        solver.assert(expression)
+        assertEquals(KSolverStatus.SAT, solver.check())
+        solver.pop()
+
+        solver.push()
+        solver.assert(expression)
+        assertEquals(KSolverStatus.SAT, solver.check())
+        solver.pop()
+    }
+
+    @Test
     fun testTimeout(): Unit = with(ctx) {
         val array by mkArraySort(intSort, mkArraySort(intSort, intSort))
         val result by mkArraySort(intSort, intSort)
