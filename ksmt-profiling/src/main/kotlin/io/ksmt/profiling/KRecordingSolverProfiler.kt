@@ -50,14 +50,11 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     private val eventsLock = Any()
     private val currentTask = ThreadLocal<KSolverTask?>()
 
-    // Everything below is guarded by [eventsLock].
-    private val events = arrayListOf<KSolverProfileEvent>()
-    private val assertionCountsByScope = arrayListOf(0L)
+    // Everything below is guarded by [eventsLock]. The helper objects have no locks of their own.
+    private val eventLog = EventLog(maxRecordedEvents)
+    private val assertionStack = AssertionStack()
     private var nextSequenceNumber = 0L
     private var nextCheckId = 0L
-    private var activeAssertionCount = 0L
-    private var totalAssertionCount = 0L
-    private var droppedEventCount = 0L
     private var lastSuccessfulCheckId: Long? = null
     private var state = KSolverProfileState.ACTIVE
     private var closedAtNanos: Long? = null
@@ -79,8 +76,8 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             initialConfiguration =
                 initialConfiguration.copy(overrides = initialConfiguration.overrides.toMap()),
             eventLimit = maxRecordedEvents,
-            events = events.toList(),
-            droppedEventCount = droppedEventCount,
+            events = eventLog.toList(),
+            droppedEventCount = eventLog.droppedCount,
             attributes = profileAttributes.toMap(),
         )
     }
@@ -105,7 +102,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun assert(expr: KExpr<KBoolSort>) {
         recordUnitCall(
-            onSuccess = { addAssertions(1) },
+            onSuccess = { assertionStack.add(1) },
             event = { metadata -> KSolverAssertEvent(expr, tracked = false, metadata) },
         ) {
             delegate.assert(expr)
@@ -114,7 +111,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun assert(exprs: List<KExpr<KBoolSort>>) {
         recordUnitCall(
-            onSuccess = { addAssertions(exprs.size) },
+            onSuccess = { assertionStack.add(exprs.size) },
             event = { metadata -> KSolverAssertBatchEvent(exprs.toList(), tracked = false, metadata) },
         ) {
             delegate.assert(exprs)
@@ -123,7 +120,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun assertAndTrack(expr: KExpr<KBoolSort>) {
         recordUnitCall(
-            onSuccess = { addAssertions(1) },
+            onSuccess = { assertionStack.add(1) },
             event = { metadata -> KSolverAssertEvent(expr, tracked = true, metadata) },
         ) {
             delegate.assertAndTrack(expr)
@@ -132,7 +129,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun assertAndTrack(exprs: List<KExpr<KBoolSort>>) {
         recordUnitCall(
-            onSuccess = { addAssertions(exprs.size) },
+            onSuccess = { assertionStack.add(exprs.size) },
             event = { metadata -> KSolverAssertBatchEvent(exprs.toList(), tracked = true, metadata) },
         ) {
             delegate.assertAndTrack(exprs)
@@ -141,7 +138,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun push() {
         recordUnitCall(
-            onSuccess = { assertionCountsByScope.add(0L) },
+            onSuccess = { assertionStack.push() },
             event = { metadata -> KSolverPushEvent(metadata) },
         ) {
             delegate.push()
@@ -150,7 +147,7 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
 
     override fun pop(n: UInt) {
         recordUnitCall(
-            onSuccess = { removeScopes(n) },
+            onSuccess = { assertionStack.pop(n) },
             event = { metadata -> KSolverPopEvent(n, metadata) },
         ) {
             delegate.pop(n)
@@ -279,20 +276,6 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         if (closedAtNanos == null) closedAtNanos = System.nanoTime()
     }
 
-    private fun addAssertions(count: Int) {
-        val countAsLong = count.toLong()
-        assertionCountsByScope[assertionCountsByScope.lastIndex] += countAsLong
-        activeAssertionCount += countAsLong
-        totalAssertionCount += countAsLong
-    }
-
-    private fun removeScopes(n: UInt) {
-        val removedScopeCount = minOf(n.toLong(), assertionCountsByScope.lastIndex.toLong()).toInt()
-        repeat(removedScopeCount) {
-            activeAssertionCount -= assertionCountsByScope.removeAt(assertionCountsByScope.lastIndex)
-        }
-    }
-
     private inline fun recordUnitCall(
         crossinline onSuccess: () -> Unit = {},
         crossinline onFailure: (Throwable) -> Unit = {},
@@ -379,9 +362,9 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
             duration = (finishedAtNanos - startedAtNanos).coerceAtLeast(0).nanoseconds,
             outcome = outcome,
             task = task,
-            stackDepth = assertionCountsByScope.lastIndex,
-            activeAssertionCount = activeAssertionCount,
-            totalAssertionCount = totalAssertionCount,
+            stackDepth = assertionStack.depth,
+            activeAssertionCount = assertionStack.active,
+            totalAssertionCount = assertionStack.total,
             failureType = failureType,
             failureMessage = failureMessage,
         )
@@ -391,19 +374,79 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     private fun elapsedSinceStart(nowNanos: Long): Duration =
         (nowNanos - startedAtNanos).coerceAtLeast(0).nanoseconds
 
-    private fun addEvent(event: KSolverProfileEvent) {
-        if (events.size < maxRecordedEvents) {
-            events += event
-        } else {
-            droppedEventCount++
-        }
-    }
+    private fun addEvent(event: KSolverProfileEvent) = eventLog.add(event)
 
     private data class ProfiledCall(
         val sequenceNumber: Long,
         val startedAtNanos: Long,
         val task: KSolverTask?,
     )
+
+    /**
+     * Bounded list of events. Once [limit] events are stored, later events are only counted,
+     * so the stored events are always an exact prefix of the call history.
+     * Not thread-safe: the owner guards it with its own lock.
+     */
+    private class EventLog(private val limit: Int) {
+        private val events = arrayListOf<KSolverProfileEvent>()
+
+        /** Number of events that did not fit into the limit. */
+        var droppedCount = 0L
+            private set
+
+        fun add(event: KSolverProfileEvent) {
+            if (events.size < limit) {
+                events += event
+            } else {
+                droppedCount++
+            }
+        }
+
+        /** Returns a copy, so later [add] calls do not change it. */
+        fun toList(): List<KSolverProfileEvent> = events.toList()
+    }
+
+    /**
+     * Assertion counters that mirror the push/pop stack of the solver.
+     *
+     * The first element of [countsByScope] belongs to the base level, so [depth] is the number of
+     * open scopes. [active] always equals the sum of [countsByScope]. [total] only grows.
+     * Not thread-safe: the owner guards it with its own lock.
+     */
+    private class AssertionStack {
+        private val countsByScope = arrayListOf(0L)
+
+        /** Number of open scopes (zero when only the base level exists). */
+        val depth: Int get() = countsByScope.lastIndex
+
+        /** Assertions that are still in effect. */
+        var active = 0L
+            private set
+
+        /** Assertions added since the session started, including already removed ones. */
+        var total = 0L
+            private set
+
+        fun push() {
+            countsByScope += 0L
+        }
+
+        /** Counts [count] assertions in the innermost scope. */
+        fun add(count: Int) {
+            val countAsLong = count.toLong()
+            countsByScope[countsByScope.lastIndex] += countAsLong
+            active += countAsLong
+            total += countAsLong
+        }
+
+        /** Removes up to [n] scopes; the base level is never removed. */
+        fun pop(n: UInt) {
+            val removedScopeCount = minOf(n.toLong(), countsByScope.lastIndex.toLong()).toInt()
+            repeat(removedScopeCount) {
+                active -= countsByScope.removeAt(countsByScope.lastIndex)
+            }
+        }
+    }
 
     companion object {
         const val DEFAULT_MAX_RECORDED_EVENTS = 1_000_000
