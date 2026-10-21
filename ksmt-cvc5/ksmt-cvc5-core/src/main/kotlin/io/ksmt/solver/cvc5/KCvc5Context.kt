@@ -139,11 +139,6 @@ class KCvc5Context(
     fun saveInternalizedExpr(expr: KExpr<*>, internalized: Term): Term =
         internalizeAst(currentScopeExpressions, cvc5Expressions, expr) { internalized }
 
-    /**
-     * save expr, which is in global cache, to the current scope cache
-     */
-    fun savePreviouslyInternalizedExpr(expr: KExpr<*>): Term = saveInternalizedExpr(expr, expressions[expr]!!)
-
     fun saveConvertedExpr(expr: Term, converted: KExpr<*>): KExpr<*> =
         convertAst(currentScopeExpressions, cvc5Expressions, expr) { converted }
 
@@ -425,7 +420,6 @@ class KCvc5Context(
         override fun <T : KSort> transform(expr: KConst<T>): KExpr<T> = cacheIfNeed(expr) {
             this@KCvc5Context.addDeclaration(expr.decl)
             uninterpretedSortCollector.collect(expr.decl)
-            this@KCvc5Context.savePreviouslyInternalizedExpr(expr)
         }
 
         override fun <A : KArraySortBase<R>, R : KSort> transform(expr: KFunctionAsArray<A, R>): KExpr<A> =
@@ -445,7 +439,6 @@ class KCvc5Context(
 
         override fun transform(expr: KUniversalQuantifier): KExpr<KBoolSort> = cacheIfNeed(expr) {
             transformQuantifier(expr.bounds.toSet(), expr.body)
-            this@KCvc5Context.savePreviouslyInternalizedExpr(expr)
         }
 
         private fun transformQuantifier(bounds: Set<KDecl<*>>, body: KExpr<*>) {
@@ -457,8 +450,13 @@ class KCvc5Context(
             if (expr in currentScopeExpressions)
                 return expr
 
+            // Some cvc5 internalizers rewrite an expression before producing a native term.
+            // The rewritten form can omit nodes from the original expression tree, so a cached
+            // root does not imply that every source node has an entry in the global cache.
+            val internalized = expressions[expr] ?: return expr
+
             expr.transform()
-            this@KCvc5Context.savePreviouslyInternalizedExpr(expr)
+            this@KCvc5Context.saveInternalizedExpr(expr, internalized)
             return expr
         }
     }
