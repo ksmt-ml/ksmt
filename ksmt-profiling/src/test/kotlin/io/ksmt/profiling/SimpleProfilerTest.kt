@@ -63,6 +63,23 @@ class SimpleProfilerTest {
         // But one constraint was added during the whole session.
         assertEquals(1L, pop.metadata.totalAssertionCount)
     }
+    @Test
+    fun `configure is forwarded and recorded as opaque event`() {
+        val profiler = KRecordingSolverProfiler(
+            delegate = FakeSolver(KContext()),
+            solver = KSolverDescriptor(name = "fake"),
+        )
+        var configuratorCalled = false
+
+        profiler.configure { configuratorCalled = true }
+
+        assertEquals(true, configuratorCalled)
+        val event = assertIs<KSolverConfigureEvent>(profiler.snapshot().events.single())
+        assertEquals(null, event.overrides)
+        assertEquals(KSolverCallOutcome.SUCCESS, event.metadata.outcome)
+    }
+
+
 
     // A minimal real KSolverConfiguration
     private class FakeConfiguration : KSolverConfiguration {

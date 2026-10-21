@@ -92,6 +92,13 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
         }
     }
 
+    /**
+     * Forwards the configuration change and records it as an opaque event (`overrides = null`):
+     * the [configurator] lambda cannot be inspected without a solver-specific wrapper.
+     *
+     * Options that must be visible to profile consumers (for example the ones applied to a fresh
+     * solver before any assertion) belong to [initialConfiguration].
+     */
     override fun configure(configurator: Config.() -> Unit) {
         recordUnitCall(
             event = { metadata -> KSolverConfigureEvent(overrides = null, metadata) },
