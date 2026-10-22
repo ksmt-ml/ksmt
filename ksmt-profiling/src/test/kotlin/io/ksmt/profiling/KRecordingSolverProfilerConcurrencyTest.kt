@@ -203,6 +203,23 @@ class KRecordingSolverProfilerConcurrencyTest {
         val access = assertIs<KSolverResultAccessEvent>(profiler.snapshot().events.single())
         assertNull(access.checkId)
     }
+    @Test
+    fun `result access after assert and pop stays linked to the last successful check`() {
+        val profiler = profiler(StubSolver(ctx))
+
+        profiler.push()
+        profiler.check()
+        profiler.assert(ctx.mkTrue())
+        profiler.pop(1u)
+        profiler.reasonOfUnknown()
+
+        val events = profiler.snapshot().events
+        val check = events.filterIsInstance<KSolverCheckEvent>().single()
+        val access = events.filterIsInstance<KSolverResultAccessEvent>().single()
+        assertEquals(check.checkId, access.checkId)
+    }
+
+
 
     private fun profiler(delegate: KSolver<TestConfiguration>) =
         KRecordingSolverProfiler(delegate = delegate, solver = KSolverDescriptor("test"))

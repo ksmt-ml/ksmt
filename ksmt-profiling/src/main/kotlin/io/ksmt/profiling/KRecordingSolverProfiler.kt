@@ -55,6 +55,9 @@ class KRecordingSolverProfiler<Config : KSolverConfiguration>(
     private val assertionStack = AssertionStack()
     private var nextSequenceNumber = 0L
     private var nextCheckId = 0L
+
+    // Deliberately not reset by assert/push/pop: backends such as cvc5 keep the previous result
+    // readable until the next check, so result accesses stay linked to the last successful check.
     private var lastSuccessfulCheckId: Long? = null
     private var state = KSolverProfileState.ACTIVE
     private var closedAtNanos: Long? = null
